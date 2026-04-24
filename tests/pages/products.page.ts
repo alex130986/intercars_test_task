@@ -1,92 +1,96 @@
-import {Page, Locator} from '@playwright/test';
-import {ProductData} from '../fixtures/test-data';
+import { Page, Locator } from '@playwright/test';
+import { ProductData } from '../fixtures/test-data';
 
 export class ProductsPage {
     readonly page: Page;
-    readonly filterMenu: Locator;
-    readonly filterOptions: Locator;
-    readonly productItems: Locator;
+    readonly filterGroups: Locator;
+    readonly filterCounts: Locator;
     readonly productPrices: Locator;
-    readonly productNames: Locator;
     readonly addToCartButtons: Locator;
-    readonly totalProductsCount: Locator;
 
     constructor(page: Page) {
         this.page = page;
-        this.filterMenu = page.locator('.filter-menu, .filters');
-        this.filterOptions = page.locator('.filter-option, .filter-item');
-        this.productItems = page.locator('.product-item, .product');
-        this.productPrices = page.locator('.price, .product-price');
-        this.productNames = page.locator('.product-name, .name');
-        this.addToCartButtons = page.locator('button:has-text("Add to cart"), .add-to-cart');
-        this.totalProductsCount = page.locator('.total-products, .products-count');
+        this.filterGroups = page.locator('div#collapse div.btn-groups:not(.btn-group-back)');
+        this.filterCounts = page.locator('div#collapse div.btn-groups:not(.btn-group-back) span.count');
+        this.productPrices = page.locator('[datatest-id="tap-item-product-price"].gross');
+        this.addToCartButtons = page.locator('button.addtocard:visible');
     }
 
-    async verifyFilterCountMatchesTotal(): Promise<boolean> {
-        // Get total from filter menu
-        const filterTotalText = await this.filterMenu.locator('.total-count, .all-products').textContent() || '0';
-        const filterTotal = parseInt(filterTotalText.match(/\d+/)?.[0] || '0');
-
-        // Get actual product count on page
-        const actualProducts = await this.productItems.count();
-
-        console.log(`Filter total: ${filterTotal}, Actual products: ${actualProducts}`);
-        return filterTotal === actualProducts;
+    async waitForProducts() {
+        await this.productPrices.first().waitFor({ state: 'visible', timeout: 15000 });
     }
 
-    async applyRandomFilter(): Promise<string> {
-        const filters = await this.filterOptions.all();
-        if (filters.length === 0) throw new Error('No filters available');
+    async getFilterSubcategoryTotal(): Promise<number> {
+        await this.filterCounts.first().waitFor({ state: 'visible', timeout: 10000 });
+        const counts = await this.filterCounts.all();
+        let total = 0;
 
-        // Select random filter (skip first if it's "All")
-        const randomIndex = Math.floor(Math.random() * (filters.length - 1)) + 1;
-        const selectedFilter = filters[randomIndex];
-        const filterName = await selectedFilter.textContent() || 'Unknown filter';
+        for (const countEl of counts) {
+            const text = await countEl.textContent() || '0';
+            const match = text.match(/(\d+)/);
+            if (match) {
+                total += parseInt(match[1]);
+            }
+        }
+        return total;
+    }
 
-        await selectedFilter.click();
-        await this.page.waitForLoadState('networkidle');
-        await this.page.waitForTimeout(2000); // Wait for products to reload
+    async applyFilter(index: number = 0): Promise<string> {
+        const filterLink = this.filterGroups.nth(index).locator('a.btn-link');
+        await filterLink.waitFor({ state: 'visible', timeout: 10000 });
+        const filterName = await filterLink.locator('span.group-filter-name').textContent() || 'Unknown';
 
-        console.log(`Applied filter: ${filterName}`);
-        return filterName;
+        await filterLink.click();
+        await this.page.waitForLoadState('load');
+        await this.waitForProducts();
+
+        return filterName.trim();
     }
 
     async getProductsList(): Promise<ProductData[]> {
         const products: ProductData[] = [];
-        const count = await this.productItems.count();
+        const count = await this.productPrices.count();
 
         for (let i = 0; i < Math.min(count, 10); i++) {
-            const name = await this.productNames.nth(i).textContent() || `Product ${i}`;
             const priceText = await this.productPrices.nth(i).textContent() || '0';
-            const price = parseFloat(priceText.replace(/[^0-9.,]/g, '').replace(',', '.'));
-
-            products.push({
-                name: name.trim(),
-                price,
-                id: `product-${i}`
-            });
+            const price = parseFloat(priceText.replace(',', '.'));
+            products.push({ name: `Product ${i}`, price, id: `product-${i}` });
         }
-
         return products;
     }
 
-    async addProductToCart(productIndex: number): Promise<ProductData> {
-        const product = {
-            name: await this.productNames.nth(productIndex).textContent() || `Product ${productIndex}`,
-            price: parseFloat((await this.productPrices.nth(productIndex).textContent() || '0').replace(/[^0-9.,]/g, '').replace(',', '.')),
-            id: `product-${productIndex}`
-        };
+    /**
+     * Add product to cart and handle the modal.
+     * @param productIndex - index of the product in the list
+     * @param goToCart - if true, clicks "Przejdź do koszyka" to navigate to cart;
+     *                   if false, clicks "Kontynuuj zakupy" to stay on the page
+     */
+    async addProductToCart(productIndex: number, goToCart: boolean = false): Promise<ProductData> {
+        const priceText = await this.productPrices.nth(productIndex).textContent() || '0';
+        const price = parseFloat(priceText.replace(',', '.'));
+        const product: ProductData = { name: `Product ${productIndex}`, price, id: `product-${productIndex}` };
 
+        await this.addToCartButtons.nth(productIndex).scrollIntoViewIfNeeded();
+        await this.page.waitForTimeout(1000);
         await this.addToCartButtons.nth(productIndex).click();
-        await this.page.waitForTimeout(1000); // Wait for add to cart animation
 
-        // Handle possible modal/popup
-        const closeButton = this.page.locator('button:has-text("Close"), .close-modal');
-        if (await closeButton.isVisible({timeout: 2000}).catch(() => false)) {
-            await closeButton.click();
+        const modal = this.page.locator('#modalAddToCard');
+        await modal.waitFor({ state: 'visible', timeout: 10000 });
+        await this.page.waitForTimeout(1500);
+
+        if (goToCart) {
+            const goToCartBtn = modal.locator('button[datatest-id="tap-addtobasket-basket"]');
+            await goToCartBtn.click();
+            await this.page.waitForTimeout(3000);
+            if (!this.page.url().includes('/cart')) {
+                await this.page.goto('https://intercars.pl/cart/', { waitUntil: 'domcontentloaded' });
+            }
+        } else {
+            await modal.locator('button[datatest-id="tap-addtobasket-continue"]').click();
+            await modal.waitFor({ state: 'hidden', timeout: 5000 });
+            await this.page.waitForTimeout(1500);
         }
 
-        console.log(`Added to cart: ${product.name} for ${product.price} PLN`);
         return product;
     }
 }
